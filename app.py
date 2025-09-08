@@ -115,21 +115,174 @@ def display_file_info(uploaded_file):
     st.info(f"文件大小: {file_size:,} 字节 ({file_size/1024:.1f} KB)")
 
 
+def is_diagnosis_request(user_input, api_key):
+    """
+    使用大模型判断用户输入是否是诊断请求
+    """
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com/v1"
+        )
+
+        system_prompt = """你是一个智能判断助手。你的任务是判断用户的输入是否是要求进行风机轴承故障诊断的请求。
+
+判断标准：
+- 如果用户明确要求诊断、分析数据文件、检测故障等，返回 "YES"
+- 如果用户只是询问诊断相关的概念、原理、方法等理论问题，返回 "NO"
+- 如果用户询问无关话题（天气、新闻、其他技术问题等），返回 "NO"
+
+请只回答 "YES" 或 "NO"，不要有其他内容。
+
+示例：
+用户："请帮我诊断这个轴承数据" -> YES
+用户："什么是故障诊断？" -> NO
+用户："今天天气怎么样？" -> NO
+用户："分析一下我上传的振动数据" -> YES
+用户："风机轴承故障诊断的原理是什么？" -> NO
+用户："帮我检测设备是否有问题" -> YES
+"""
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input}
+            ],
+            max_tokens=10,
+            temperature=0.1
+        )
+
+        result = response.choices[0].message.content.strip().upper()
+        return result == "YES"
+
+    except Exception as e:
+        print(f"语义判断失败: {e}")
+        # 如果API调用失败，回退到关键词检测
+        return fallback_keyword_detection(user_input)
+
+
+def fallback_keyword_detection(user_input):
+    """
+    备用的关键词检测方法
+    """
+    diagnosis_keywords = ["诊断", "检测", "分析数据", "故障检测", "轴承分析"]
+    non_diagnosis_keywords = ["是什么", "怎么", "为什么", "原理", "方法", "概念"]
+
+    input_lower = user_input.lower()
+
+    # 如果包含明确的非诊断关键词，返回False
+    if any(keyword in input_lower for keyword in non_diagnosis_keywords):
+        return False
+
+    # 如果包含诊断关键词，返回True
+    return any(keyword in input_lower for keyword in diagnosis_keywords)
+
+
+def is_diagnosis_response(response_text, api_key):
+    """
+    使用大模型判断Agent回复是否是诊断结果
+    """
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com/v1"
+        )
+
+        system_prompt = """你是一个智能判断助手。你的任务是判断给定的文本是否是风机轴承故障诊断的结果报告。
+
+判断标准：
+- 如果文本包含具体的诊断数据、分析结果、故障状态、置信度等实际诊断内容，返回 "YES"
+- 如果文本只是理论解释、概念说明、操作指导等，返回 "NO"
+- 如果文本是普通对话回复，返回 "NO"
+
+请只回答 "YES" 或 "NO"，不要有其他内容。
+
+典型的诊断结果特征：
+- 包含具体数值（置信度、异常分、预测值等）
+- 包含诊断状态（正常/故障/异常）
+- 包含分析指标和数据
+- 结构化的诊断报告格式
+"""
+
+        # 只取前500字符进行判断，避免token过多
+        text_sample = response_text[:500] if len(
+            response_text) > 500 else response_text
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"请判断这段文本是否是诊断结果：\n\n{text_sample}"}
+            ],
+            max_tokens=10,
+            temperature=0.1
+        )
+
+        result = response.choices[0].message.content.strip().upper()
+        return result == "YES"
+
+    except Exception as e:
+        print(f"诊断结果判断失败: {e}")
+        # 如果API调用失败，回退到关键词检测
+        return fallback_result_detection(response_text)
+
+
+def fallback_result_detection(response_text):
+    """
+    备用的诊断结果检测方法
+    """
+    # 更严格的结构化检测
+    return (
+        ("诊断概况" in response_text and "详细分析指标" in response_text) or
+        ("置信度得分" in response_text and "异常得分" in response_text) or
+        ("使用模型" in response_text and (
+            "IsolationForest" in response_text or "故障检测" in response_text))
+    )
+
+
 def display_diagnosis_report(diagnosis_result, title="📊 诊断结果报告"):
-    """以优化格式显示诊断报告 - 确保全宽度显示"""
+    """以优化格式显示诊断报告 - 使用改进的状态检测"""
     # 使用完整宽度的分割线
     st.markdown("---")
 
-    # 直接使用 streamlit 的默认布局，不添加任何容器
+    # 直接使用 streamlit 的默认布局
     st.subheader(title)
 
-    # 检查是否包含特定的诊断状态关键词来应用不同的样式
-    if "健康" in diagnosis_result or "正常" in diagnosis_result:
-        st.success("✅ 设备状态良好")
-    elif "异常" in diagnosis_result or "故障" in diagnosis_result:
-        st.error("⚠️ 检测到异常")
-    elif "警告" in diagnosis_result:
-        st.warning("⚠️ 需要关注")
+    # 使用改进的状态分析
+    status_type, status_message, status_level = analyze_diagnosis_status(
+        diagnosis_result)
+
+    # 根据分析结果显示状态
+    if status_level == 'success':
+        st.success(status_message)
+    elif status_level == 'error':
+        st.error(status_message)
+    elif status_level == 'warning':
+        st.warning(status_message)
+    else:
+        st.info(status_message)
+
+    # 添加状态统计信息（可选）
+    with st.expander("🔍 状态分析详情", expanded=False):
+        st.markdown(f"**检测到的状态类型**: {status_type}")
+
+        # 显示关键信息摘要
+        if "故障" in diagnosis_result:
+            fault_info = []
+            lines = diagnosis_result.split('\n')
+            for line in lines:
+                if '故障' in line or '异常' in line:
+                    fault_info.append(line.strip())
+
+            if fault_info:
+                st.markdown("**关键发现**:")
+                for info in fault_info[:5]:  # 只显示前5条
+                    st.markdown(f"- {info}")
 
     # 在一个扩展容器中显示完整报告内容
     with st.expander("📋 查看完整诊断报告", expanded=True):
@@ -273,10 +426,7 @@ def start_single_diagnosis(temp_file_path, file_name):
         add_to_chat_history("user", f"单文件诊断：{file_name}")
         add_to_chat_history("assistant", diagnosis_result)
 
-        # 先在聊天界面显示
-        with st.chat_message("assistant"):
-            st.markdown(diagnosis_result)
-
+    # 移除聊天界面显示，只使用全宽报告显示
     # 使用 session_state 存储诊断结果，在主函数中显示
     st.session_state.diagnosis_result = diagnosis_result
     st.session_state.diagnosis_title = "📊 单文件诊断结果报告"
@@ -313,10 +463,7 @@ def start_batch_diagnosis(uploaded_files, temp_file_paths):
             "user", f"批量诊断 {len(uploaded_files)} 个文件：{', '.join(file_names)}")
         add_to_chat_history("assistant", diagnosis_result)
 
-        # 先在聊天界面显示
-        with st.chat_message("assistant"):
-            st.markdown(diagnosis_result)
-
+    # 移除聊天界面显示，只使用全宽报告显示
     # 使用 session_state 存储诊断结果，在主函数中显示
     st.session_state.diagnosis_result = diagnosis_result
     st.session_state.diagnosis_title = "📊 批量诊断结果报告"
@@ -329,11 +476,14 @@ def add_to_chat_history(role, content):
 
 
 def chat_interface():
-    """聊天界面"""
+    """聊天界面 - 使用语义判断"""
     if prompt := st.chat_input("有什么问题吗？"):
         if 'agent' not in st.session_state:
             st.error("请先在侧边栏输入DeepSeek API Key")
         else:
+            # 获取API Key
+            api_key = os.getenv("DEEPSEEK_API_KEY")
+
             # 添加用户消息
             add_to_chat_history("user", prompt)
             with st.chat_message("user"):
@@ -343,9 +493,19 @@ def chat_interface():
             with st.chat_message("assistant"):
                 with st.spinner("思考中..."):
                     response = st.session_state.agent.chat(prompt)
-                    st.markdown(response)
 
-            # 添加助手回复
+                    # 使用语义判断是否是诊断结果
+                    if api_key and is_diagnosis_response(response, api_key):
+                        st.markdown("**诊断完成！请查看下方的详细报告。**")
+                        # 存储到 session_state 用于全宽显示
+                        st.session_state.diagnosis_result = response
+                        st.session_state.diagnosis_title = "🔍 风机轴承故障诊断结果分析"
+                        st.session_state.show_diagnosis = True
+                    else:
+                        # 普通聊天回复正常显示
+                        st.markdown(response)
+
+            # 添加助手回复到历史
             add_to_chat_history("assistant", response)
 
 
@@ -410,40 +570,41 @@ def main():
     # 页面标题
     st.title("⚙️ 风机轴承故障诊断Agent")
     st.markdown("基于LangChain的智能故障诊断助手")
-    
+
     # 初始化侧边栏
     api_key = init_sidebar()
-    
-    # 显示聊天历史
+
+    # 显示聊天历史（排除诊断结果，因为会在下方全宽显示）
     display_chat_history()
-    
+
     # 文件上传区域
     st.subheader("📁 文件上传")
-    
+
     # 添加标签页支持单文件和批量上传
     tab1, tab2 = st.tabs(["🔸 单文件诊断", "📦 批量诊断"])
-    
+
     with tab1:
         single_file_diagnosis()
-    
+
     with tab2:
         batch_file_diagnosis()
-    
-    # 在这里显示诊断报告 - 完全脱离tab布局
+
+    # 在这里显示诊断报告 - 完全脱离tab布局，统一的全宽显示
     if hasattr(st.session_state, 'show_diagnosis') and st.session_state.show_diagnosis:
-        display_diagnosis_report(st.session_state.diagnosis_result, st.session_state.diagnosis_title)
+        display_diagnosis_report(
+            st.session_state.diagnosis_result, st.session_state.diagnosis_title)
         # 显示后清除标志，避免重复显示
         st.session_state.show_diagnosis = False
-    
+
     # 使用指南
     display_usage_guide()
-    
+
     # 聊天界面
     chat_interface()
-    
+
     # 底部控制按钮
     bottom_controls()
-    
+
     # 页脚
     st.markdown("---")
     st.markdown("💡 **提示**: 批量诊断可以同时处理多个文件，大大提高分析效率！单个大文件建议先进行上传测试。")
